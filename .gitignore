@@ -1,0 +1,38 @@
+# ---- R / RStudio ----
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+.Renviron
+.Rprofile
+
+# ---- renv (reproducible env) ----
+renv/library/
+renv/staging/
+renv/python/
+# keep these:
+!renv.lock
+!renv/activate.R
+
+# ---- Outputs & data ----
+figures/
+!figures/.gitkeep
+tables/
+!tables/.gitkeep
+results/
+!results/.gitkeep
+data/
+!data/.gitkeep
+
+# Common data formats
+*.csv
+*.tsv
+*.xlsx
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
