@@ -63,4 +63,4 @@ Code is released under the MIT License (see LICENSE).
 SPDX header you may add to R files:
 # SPDX-License-Identifier: MIT
 Contact / issues
-Open a GitHub Issue or email YOUR.EMAIL@DOMAIN.
+Open a GitHub Issue or email gregory.i.berumen@vanderbilt.edu.
