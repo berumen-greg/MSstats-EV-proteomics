@@ -1,11 +1,11 @@
 Project overview
-This repository contains a minimal, reproducible R script to run MSstats on extracellular vesicle (EV) proteomics data used in our manuscript (Berumen et al., 2025, Proteomics.
-- src/run_msstats_analysis.R — reads input files, runs MSstats preprocessing and model fitting, and writes tables to tables/ with optional figures in figures/.
+This repository contains a minimal, reproducible R script to run MSstats on extracellular vesicle (EV) proteomics data used in our manuscript (Berumen et al., 2025, Proteomics).
+- src/msstats_v4.8.7_mq_6349.R — reads input files, runs MSstats preprocessing and model fitting, and writes tables to tables/ with optional figures in figures/.
 Raw data are available at ProteomeXchange/PRIDE: PXD063788. Place your local copies under data/ (ignored) and update the paths in the script or a config file.
 Repository structure
 msstats-ev-proteomics/
 ├─ src/
-│  └─ run_msstats_analysis.R
+│  └─ msstats_v4.8.7_mq_6349.R
 ├─ config/                 # optional: YAML with paths/parameters
 │  └─ analysis-config.yml
 ├─ figures/                # outputs (PNG/SVG/PDF)
@@ -32,9 +32,9 @@ renv::activate()     # uses renv/activate.R from this repo
 renv::restore()      # installs packages recorded in renv.lock
 
 # 2) Run the analysis
-source("src/run_msstats_analysis.R")
+source("src/msstats_v4.8.7_mq_6349.R")
 # or from terminal:
-# Rscript src/run_msstats_analysis.R --config config/analysis-config.yml
+# Rscript src/msstats_v4.8.7_mq_6349.R --config config/analysis-config.yml
 
 Inputs & configuration
 Expected inputs (adjust as needed):
@@ -63,4 +63,4 @@ Code is released under the MIT License (see LICENSE).
 SPDX header you may add to R files:
 # SPDX-License-Identifier: MIT
 Contact / issues
-Open a GitHub Issue or email gregory.i.berumen@vanderbilt.edu.
+Open a GitHub Issue or email YOUR.EMAIL@DOMAIN.
