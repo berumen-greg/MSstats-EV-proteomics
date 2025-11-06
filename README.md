@@ -82,7 +82,7 @@ renv::snapshot()
 ## Citation
 Please cite:
 1. **MSstats:** Choi *et al.* *Bioinformatics* (2014) 30:2524–2536.  
-2. **This repository:** add the Zenodo DOI after release.
+2. **This repository:** 10.5281/zenodo.17546119
 
 Once the concept DOI is minted, add this badge near the top:
 ```markdown
