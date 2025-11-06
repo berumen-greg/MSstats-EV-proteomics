@@ -1,0 +1,560 @@
+# Processes MaxQuant results
+# using MSstats version 4.8.7
+
+
+library(MSstats)
+library(MSstatsConvert)
+library(data.table)
+library(openxlsx)
+library(stringr)
+library(dplyr)
+
+
+
+## change if your input files and output files are different
+
+output_file <- "6349_tech_reps_mq_msstats_4.8.7_report.xlsx"
+proteingroups_file <- "6349_20231009_tech_reps_mq_proteinGroups.txt"
+evidence_file <- "6349_20231009_tech_reps_mq_evidence.txt"
+annotation_file <- "6349_annotations_w_tech_reps.txt"
+comparison_file <- "comparisons.txt"
+
+###
+
+
+##### Functions for processing Fasta Headers in MQ output
+getAccessionFromHeader <- function(fasta_field) {
+
+  headers <- unlist(str_split(fasta_field, ";"))
+  tokens <- lapply(headers, function(x) {str_split(x,"\\|")})
+
+  accessions <- list()
+  for(header in tokens) {
+    h <- unlist(header)
+    if (length(h) > 1) {
+      accessions <- append(accessions, h[2])
+    }
+  }
+  return(paste(accessions,collapse=";"))
+}
+getProteinNameFromHeader <- function(fasta_field) {
+
+  headers <- unlist(str_split(fasta_field, ";"))
+  tokens <- lapply(headers, function(x) {str_split(x,"\\|")})
+  protein_names <- list()
+  for(header in tokens) {
+    h <- unlist(header)
+    if (length(h) > 2) {
+      protein_name <- str_extract(h[3],"([A-Z0-9]{3,}_[A-Z0-9]{3,})")
+      if ( !is.na(protein_name)) {
+        protein_names <- append(protein_names, protein_name)
+      }
+    }
+  }
+  return(paste(protein_names,collapse=";"))
+}
+
+
+##### End of Functions
+
+proteinGroups <- read.table(proteingroups_file, sep = "\t", header = TRUE)
+evidence <- read.table(evidence_file, sep = "\t", header = TRUE)
+annotation <- read.table(annotation_file, sep="\t", header=TRUE)
+
+annotation$Raw.file <- str_replace(annotation$Raw.file, ".raw", "")
+
+mq_df <- MaxQtoMSstatsFormat(evidence, annotation,
+                    proteinGroups,
+                    removeFewMeasurements = TRUE,
+                    removeProtein_with1Peptide = TRUE,
+                    use_log_file = TRUE, verbose = TRUE,
+                    log_file_path = "./load_maxquant.log")
+
+
+# defaults for dataProcess:
+# log2 intensities
+# equalizeMedians normalization
+# min feature count = 2
+# feature subset = all
+# summary method = "TMP"
+# censored int = "NA"
+# MBimpute = TRUE
+# remove runs which have more than 50% missing values = FALSE
+# max quantile for censored = 0.999
+
+processed_dt <- dataProcess(mq_df )
+no_norm_processed_dt <- dataProcess(mq_df, normalization = FALSE)
+
+processed_dt_no_impute <- dataProcess(mq_df, MBimpute = FALSE, min_feature_count = 2  )
+sample_levels <- levels(processed_dt$ProteinLevelData$GROUP)
+sample_levels
+
+comparison <- read.table(comparison_file,sep="\t", header=TRUE)
+comparison_df <- comparison[,c(sample_levels)]
+comparison_df[is.na(comparison_df)] <- 0
+
+row_names <- vector()
+groups <- colnames(comparison_df)
+for (i in 1:NROW(comparison_df)) {
+  pair <- comparison_df[i,]
+  numerator <- groups[which(pair==1)]
+  denominator <- groups[which(pair==-1)]
+  label <- paste(numerator,"v", denominator, sep="_")
+  row_names <-  append(row_names,label)
+}
+
+row.names(comparison_df) <- row_names
+comparison_df
+
+dataProcessPlots(no_norm_processed_dt, type="QCPlot")
+
+# group comparisons default options:
+# save fitted models = TRUE
+# log base = 2
+
+# Normalized
+groupCompareResults <- groupComparison(contrast.matrix=comparison_df, data=processed_dt)
+
+# not Normalized
+nonorm_groupCompareResults <- groupComparison(contrast.matrix=comparison_df, data=no_norm_processed_dt)
+
+## all MSstats processing is done
+## Rest of code formats the report with protein IDs from proteinGroups output
+## and spread multiple comparisons across the spreadsheet for better readability
+
+#############
+# Get protein names and gene names from proteinGroups
+#############
+protein_names_df <- proteinGroups[,c("Protein.IDs", "Majority.protein.IDs", "Fasta.headers")]
+colnames(protein_names_df) <- c("protein", "majority_protein_ids", "fasta_headers")
+protein_names_df <- protein_names_df[order(protein_names_df$protein),]
+protein_names_df$accessions <- lapply(protein_names_df$fasta_headers, getAccessionFromHeader)
+protein_names_df$protein_names <- lapply(protein_names_df$fasta_headers, getProteinNameFromHeader)
+#############
+# Get protein intensities
+#############
+protein_intensities_df <- as.data.frame(proteinGroups$Protein.IDs)
+proteinGroups_colnames <- colnames(proteinGroups)
+
+prefixes <- sample_levels
+for (i in 1:NROW(sample_levels)) {
+  group <- sample_levels[i]
+  prefix <- paste(prefixes[i], "_", sep="")
+  pattern <- paste("Intensity.", prefix, sep="")
+  int_cols <- proteinGroups_colnames[which(grepl(pattern, proteinGroups_colnames ) )]
+  intensities_df <- proteinGroups[,int_cols]
+  n_samples_present <- rowSums(intensities_df != 0)
+  n_samples <- NROW(int_cols)
+  percent_sample_missing <- ((n_samples - n_samples_present) / n_samples) * 100
+  col_name <- paste("percent_sample_missing", group, sep="_")
+  protein_intensities_df[col_name] <- percent_sample_missing
+}
+
+colnames(protein_intensities_df)[1] <- "protein"
+
+# format normalized comparison results
+results <- groupCompareResults$ComparisonResult
+results$log2fc_inf <- results$log2FC
+results$log2fc_inf[which(is.infinite(results$log2fc) &
+                                     results$log2fc > 0)] <- 1000
+
+results$log2fc_inf[which(is.infinite(results$log2fc) &
+                           results$log2fc < 0)] <- -1000
+results$log2FC[which(is.infinite(results$log2FC))] <- NA
+
+results$significant <- ifelse(results$adj.pvalue < 0.05, TRUE, FALSE)
+# melt the results so we can spread out the comparisons
+
+measurement_colidx <- c(3:ncol(results))
+melted_results <- melt(as.data.table(results), c("Protein", "Label"), measurement_colidx)
+spread_results <- dcast(melted_results, Protein~Label+variable,value.var ="value")
+
+# add protein names and genes
+colnames(spread_results)[1] <- "protein"
+
+# add percent sample missing to spread_results
+spread_results <- merge(protein_intensities_df, spread_results, by="protein", all.x=FALSE, all.y=TRUE)
+# add protein names and genes
+spread_results <- merge(protein_names_df, spread_results, by="protein", all.x=FALSE, all.y=TRUE)
+
+# melting columns of numeric and char causes the numeric columns to be cast to char
+# this messes up sorting in Excel so we need to cast the numeric columns back to numeric
+
+# need to cast the numeric types back to numeric after melting
+coltypes <- lapply(results, class)
+num_coltypes <- coltypes[which(coltypes == "numeric")]
+num_colnames <- names(num_coltypes)
+
+spread_results_colnames <- colnames(spread_results)
+for (colname in num_colnames) {
+  spread_colidx <- which(sapply(spread_results_colnames,  grepl, pattern=colname ))
+  for (i in 1:NROW(spread_colidx)) {
+    colname <- names(spread_colidx[i])
+    spread_results[[colname]] <- as.numeric(spread_results[[colname]])
+  }
+}
+
+integer_coltypes <- coltypes[which(coltypes == "integer")]
+integer_colnames <- names(integer_coltypes)
+for (colname in integer_colnames) {
+  spread_colidx <- which(sapply(spread_results_colnames,  grepl, pattern=colname ))
+  for (i in 1:NROW(spread_colidx)) {
+    colname <- names(spread_colidx[i])
+    spread_results[[colname]] <- as.integer(spread_results[[colname]])
+  }
+}
+
+## Format non-normalized comparisons
+
+no_norm_results <- nonorm_groupCompareResults$ComparisonResult
+no_norm_results$log2fc_inf <- no_norm_results$log2FC
+no_norm_results$log2fc_inf[which(is.infinite(no_norm_results$log2fc) &
+                           no_norm_results$log2fc > 0)] <- 1000
+
+no_norm_results$log2fc_inf[which(is.infinite(no_norm_results$log2fc) &
+                           no_norm_results$log2fc < 0)] <- -1000
+no_norm_results$log2FC[which(is.infinite(no_norm_results$log2FC))] <- NA
+
+no_norm_results$significant <- ifelse(no_norm_results$adj.pvalue < 0.05, TRUE, FALSE)
+# melt the results so we can spread out the comparisons
+
+melted_no_norm_results <- melt(as.data.table(no_norm_results), c("Protein", "Label"), measurement_colidx)
+spread_no_norm_results <- dcast(melted_no_norm_results, Protein~Label+variable,value.var ="value")
+
+# add protein names and genes
+
+colnames(spread_no_norm_results)[1] <- "protein"
+# add percent sample missing to spread_results
+spread_no_norm_results <- merge(protein_intensities_df, spread_no_norm_results, by="protein", all.x=FALSE, all.y=TRUE)
+
+# add protein names and genes
+spread_no_norm_results <- merge(protein_names_df, spread_no_norm_results, by="protein", all.x=FALSE, all.y=TRUE)
+
+# melting columns of numeric and char causes the numeric columns to be cast to char
+# this messes up sorting in Excel so we need to cast the numeric columns back to numeric
+
+# need to cast the numeric types back to numeric after melting
+coltypes <- lapply(no_norm_results, class)
+num_coltypes <- coltypes[which(coltypes == "numeric")]
+num_colnames <- names(num_coltypes)
+spread_no_norm_results_colnames <- colnames(spread_no_norm_results)
+for (colname in num_colnames) {
+  spread_colidx <- which(sapply(spread_no_norm_results_colnames,  grepl, pattern=colname ))
+  for (i in 1:NROW(spread_colidx)) {
+    colname <- names(spread_colidx[i])
+    spread_no_norm_results[[colname]] <- as.numeric(spread_no_norm_results[[colname]])
+  }
+}
+
+integer_coltypes <- coltypes[which(coltypes == "integer")]
+integer_colnames <- names(integer_coltypes)
+for (colname in integer_colnames) {
+  spread_colidx <- which(sapply(spread_no_norm_results_colnames,  grepl, pattern=colname ))
+  for (i in 1:NROW(spread_colidx)) {
+    colname <- names(spread_colidx[i])
+    spread_no_norm_results[[colname]] <- as.integer(spread_no_norm_results[[colname]])
+  }
+}
+
+# just protein intensities
+no_norm_protein_data <- no_norm_processed_dt$ProteinLevelData[, c("Protein", "originalRUN", "LogIntensities")]
+colnames(no_norm_protein_data) <- tolower(colnames(no_norm_protein_data))
+colnames(no_norm_protein_data)[3] <- "log2_intensities"
+no_norm_protein_data$intensities <- 2 ^ no_norm_protein_data$log2_intensities
+
+
+norm_protein_data <- processed_dt$ProteinLevelData[, c("Protein", "originalRUN", "LogIntensities")]
+colnames(norm_protein_data) <- tolower(colnames(norm_protein_data))
+colnames(norm_protein_data)[3] <- "normalized_log2_intensities"
+norm_protein_data$normalized_intensities <- 2 ^ norm_protein_data$normalized_log2_intensities
+
+
+protein_data <- merge(no_norm_protein_data, norm_protein_data, by=c("protein", "originalrun"))
+
+
+
+
+# need to melt the dataframe before spreading it out with dcast
+proteins_melted <- melt(as.data.table(protein_data), c("protein", "originalrun"), c("intensities","log2_intensities","normalized_intensities", "normalized_log2_intensities"))
+
+
+# spread out the intensity and abundance columns by originalrun
+protein_spread <- dcast(proteins_melted,protein~originalrun+variable, value.var = "value")
+
+protein_spread <- merge(protein_names_df, protein_spread, by="protein", all.x=FALSE, all.y=TRUE)
+
+# Peptide intensities
+no_norm_peptide_data <- no_norm_processed_dt$FeatureLevelData[,c("PEPTIDE", "originalRUN", "INTENSITY", "ABUNDANCE", "censored")]
+colnames(no_norm_peptide_data) <- tolower(colnames(no_norm_peptide_data))
+colnames(no_norm_peptide_data)[4] <- "log2_intensity"
+
+norm_peptide_data <- processed_dt$FeatureLevelData[, c("PEPTIDE", "originalRUN", "INTENSITY", "ABUNDANCE", "censored")]
+colnames(norm_peptide_data) <- tolower(colnames(norm_peptide_data))
+# replace intensity with normalized intensity calculated from the abundance
+colnames(norm_peptide_data)[3] <- "normalized_intensity"
+colnames(norm_peptide_data)[4] <- "normalized_log2_intensity"
+colnames(norm_peptide_data)[5] <- "normalized_censored"
+
+peptide_data <- merge(no_norm_peptide_data, norm_peptide_data, by=c("peptide", "originalrun"))
+
+
+# need to melt the dataframe before spreading it out with dcast
+peptide_melted <- melt(as.data.table(peptide_data), c("peptide", "originalrun"), c("intensity", "normalized_intensity", "log2_intensity", "normalized_log2_intensity", "censored", "normalized_censored"))
+
+# spread out the intensity and abundance columns by originalrun
+peptides_spread_df <- dcast(peptide_melted,peptide~originalrun+variable, value.var = "value")
+
+# add protein names
+
+protein_peptide_df <- no_norm_processed_dt$FeatureLevelData[,c("PROTEIN", "PEPTIDE")]
+colnames(protein_peptide_df) <- tolower(colnames(protein_peptide_df))
+protein_peptide_df <- unique(protein_peptide_df)
+peptides_spread_df <- merge(protein_peptide_df, peptides_spread_df, by="peptide")
+
+# put protein as first column -- which is the 2nd column
+reordered_colidx <- c(2,1,3:ncol(peptides_spread_df))
+peptides_spread_df <- peptides_spread_df[, reordered_colidx]
+
+# sort by protein
+peptides_spread_sorted_df <-  peptides_spread_df[order(peptides_spread_df[,1], peptides_spread_df[,2]),]
+
+
+
+
+###########
+# Save all the tables
+###########
+
+workbook <- createWorkbook("Msstat Report")
+sheetName <- "Comparison Matrix"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, comparison_df, rowNames=TRUE)
+
+sheetName <- "Peptides"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, peptides_spread_sorted_df)
+
+
+sheetName <- "Proteins"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, protein_spread)
+
+sheetName <- "Comparisons - no norm"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, spread_no_norm_results)
+sheetName <- "Comparisons - norm"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, spread_results)
+
+
+saveWorkbook(workbook,file=output_file)
+rm(workbook)
+
+###############
+# PCA analysis and stats
+###############
+
+library(FactoMineR)
+library(Factoshiny)
+library(factoextra)
+
+X <- processed_dt_no_impute$ProteinLevelData
+# concat group and subject for run
+X$Run <- paste(X$GROUP, X$SUBJECT, X$RUN, sep="_")
+
+X <- X[, c("Protein", "Run", "GROUP", "LogIntensities")]
+NROW(X)
+# [1] 10035
+colnames(X)[4] <- "I"
+melted_X <- melt(as.data.table(X), c("Protein", "Run", "GROUP"), c(4))
+
+spread_X <- dcast(melted_X, Protein~Run+variable,value.var ="value", fun.aggregate = mean)
+NROW(spread_X)
+#[1] 1138
+
+cols <- colnames(spread_X)
+cols
+# [1] "Protein"       "Control_1_1_I" "Control_1_2_I" "Control_2_3_I" "Control_2_4_I"
+# [6] "Control_3_5_I" "Control_3_6_I" "Treated_4_7_I" "Treated_5_8_I" "Treated_6_9_I"
+groups <- unique(X[,c("Run", "GROUP")])
+groups$Run_I <- paste(groups$Run, "_I", sep="")
+
+# map the column # in spread_X for the group in groups
+groups$spread_X_col <- match(groups$Run_I,cols)
+
+proteins_missing <- colSums(is.na(spread_X))
+groups$proteins_missing <- proteins_missing[groups$spread_X_col]
+
+
+proteins_na <- as.data.frame(spread_X$Protein)
+colnames(proteins_na) <- c("Protein")
+keep_cols <- c()
+all_groups <- unique(groups$GROUP)
+for (group in all_groups) {
+  group_rows <- which(groups$GROUP == group)
+  colnums <- groups$spread_X_col[group_rows]
+
+  n_in_group <- NROW(group_rows)
+  n_col <- paste(group,"n_sample", sep="_")
+
+  proteins_na[n_col] <- n_in_group
+  na_col <- paste(group,"na", sep="_")
+  keep_col <- paste(group,"keep", sep="_")
+  group_na <- rowSums(is.na(spread_X[,..colnums]))
+  proteins_na[na_col] <- group_na
+  n_in_group <- NROW(group_rows)
+
+  proteins_na[keep_col] <- group_na <= (n_in_group * 0.5)
+  keep_cols <- append(keep_cols,NCOL(proteins_na))
+}
+
+# all  groups must have keep column = TRUE to be kept
+n_groups <- NROW(all_groups)
+proteins_na$keep <- rowSums(proteins_na[,keep_cols]) == n_groups
+NROW(proteins_na)
+# total proteins 1138
+proteins_to_keep <- which(proteins_na$keep)
+NROW(proteins_to_keep)
+# proteins to keep 1124
+
+
+
+
+filtered_X <- spread_X[proteins_to_keep,]
+
+# correlate V1 labels to proteins
+protein_vcol <- as.data.frame(filtered_X$Protein)
+protein_vcol$vcol <- seq(1:NROW(filtered_X))
+protein_vcol$vcol <- paste("V", protein_vcol$vcol, sep="")
+colnames(protein_vcol) <- c("Protein", "V")
+
+protein_vcol$accession <- protein_vcol$Protein
+NROW(protein_vcol)
+# 1124
+
+run_X <- filtered_X[,-1]
+NROW(run_X)
+# 1124
+group_X <- t(as.matrix(run_X))
+
+
+run_missing <- rowSums(is.na(group_X))
+run_missing
+# proteins missing by run
+#
+# 
+# Control_1_1_I Control_1_2_I Control_2_3_I Control_2_4_I Control_3_5_I Control_3_6_I 
+#            33            15            27            23            10             9 
+#Treated_4_7_I Treated_5_8_I Treated_6_9_I 
+#            6            39             5 
+
+# add group labels back into matrix
+
+run_rows <- row.names(group_X)
+run_rows
+#[1] "Control_1_1_I" "Control_1_2_I" "Control_2_3_I" "Control_2_4_I" "Control_3_5_I"
+#[6] "Control_3_6_I" "Treated_4_7_I" "Treated_5_8_I" "Treated_6_9_I"
+
+group_df <- as.data.frame(group_X)
+colnames(group_df) <- protein_vcol$accession
+group_df$Group <- groups$GROUP[match(row.names(group_df),groups$Run_I)]
+
+
+
+
+NCOL(group_df)
+# 1125
+group_df[,c(1,NCOL(group_df))]
+
+# 
+#                 A0AVT1   Group
+# Control_1_1_I 20.50796 Control
+# Control_1_2_I 20.38155 Control
+# Control_2_3_I 19.96795 Control
+# Control_2_4_I      NaN Control
+# Control_3_5_I 19.93961 Control
+# Control_3_6_I 20.04605 Control
+# Treated_4_7_I 20.55087 Treated
+# Treated_5_8_I 19.69366 Treated
+# Treated_6_9_I 20.67002 Treated
+
+# Factoshiny(group_df)
+
+n_vars <- NCOL(group_df)
+
+#impute
+nb <- missMDA::estim_ncpPCA(group_df,quali.sup=c(n_vars))$ncp
+dfcompleted <- missMDA::imputePCA(group_df,ncp=nb,quali.sup=c(n_vars))$completeObs
+# PCA
+res.PCA<-PCA(dfcompleted,quali.sup=c(n_vars),graph=FALSE)
+
+
+png(file="20231009_groups_pca_separation.png")
+plot.PCA(res.PCA,choix='var')
+
+plotellipses(res.PCA, keepvar=n_vars,invisible=c('ind.sup'),label =c('ind','quali'))
+dev.off()
+
+png(file="20231009_groups_pca.png")
+plot.PCA(res.PCA,invisible=c('ind','ind.sup'),label =c('quali'))
+dev.off()
+summary(res.PCA, file="20231009_pca_summary.txt")
+dim_summary <- dimdesc(res.PCA)
+
+all_dim_1 <- as.data.frame(dim_summary$Dim.1$quanti)
+all_dim_1$V <- row.names(all_dim_1)
+all_dim_1 <- merge(all_dim_1, protein_vcol, by="V", all.x = TRUE)
+all_dim_1 <- all_dim_1[order(all_dim_1$correlation, decreasing = TRUE),]
+
+all_dim_2 <- as.data.frame(dim_summary$Dim.2$quanti)
+all_dim_2$V <- row.names(all_dim_2)
+all_dim_2 <- merge(all_dim_2, protein_vcol, by="V", all.x = TRUE)
+all_dim_2 <- all_dim_2[order(all_dim_2$correlation, decreasing = TRUE),]
+
+all_dim_3 <- as.data.frame(dim_summary$Dim.3$quanti)
+all_dim_3$V <- row.names(all_dim_3)
+all_dim_3 <- merge(all_dim_3, protein_vcol, by="V", all.x = TRUE)
+all_dim_3 <- all_dim_3[order(all_dim_3$correlation, decreasing = TRUE),]
+
+png(filename="20231009_component_eigenvalues.png")
+ggplot2::ggplot(cbind.data.frame(x=1:nrow(res.PCA$eig),y=res.PCA$eig[,2])) + ggplot2::aes(x=x, y=y) +
+  ggplot2::geom_col(fill="blue") + ggplot2::xlab("Dimension") +
+  ggplot2::ylab("Percentage of variance") + ggplot2::ggtitle("Decomposition of the total inertia") +
+  ggplot2::theme_light() + ggplot2::theme(plot.title = ggplot2::element_text(hjust =0.5)) +
+  ggplot2::scale_x_continuous(breaks=1:nrow(res.PCA$eig))
+dev.off()
+
+
+workbook <- createWorkbook("Groups PCA Report")
+
+sheetName <- "PCA plots"
+addWorksheet(workbook, sheetName)
+insertImage(workbook, sheet=sheetName, file = "20231009_groups_pca_separation.png", width = 6, height = 6,  startCol = 1, units ="in", dpi=600)
+insertImage(workbook, sheet=sheetName, file = "20231009_groups_pca.png", width = 6, height = 6,  startCol = 10, units ="in", dpi=600)
+
+
+sheetName <- "Eigenvalues"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, res.PCA$eig, rowNames = TRUE)
+insertImage(workbook, sheet=sheetName, file = "20231009_component_eigenvalues.png", width = 6, height = 6,  startCol = 1, startRow = (NROW(res.PCA$eig) + 3), units ="in", dpi=600)
+
+sheetName <- "Dim 1"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, all_dim_1)
+
+
+sheetName <- "Dim 2"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, all_dim_2)
+
+sheetName <- "Dim 3"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, all_dim_3)
+
+sheetName <- "PCA data transposed"
+addWorksheet(workbook, sheetName)
+writeData(workbook, sheet=sheetName, filtered_X)
+
+saveWorkbook(workbook,file="6349_tech_reps_pca_groups.xlsx")
+rm(workbook)
+
