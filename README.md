@@ -97,4 +97,4 @@ SPDX header you may add to R files:
 ```
 
 ## Contact / issues
-Open a GitHub Issue or email YOUR.EMAIL@DOMAIN.
+Open a GitHub Issue or email gregory.i.berumen@vanderbilt.edu.
